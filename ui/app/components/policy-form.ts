@@ -10,6 +10,7 @@ import { service } from '@ember/service';
 import { task } from 'ember-concurrency';
 import trimRight from 'vault/utils/trim-right';
 import { tracked } from '@glimmer/tracking';
+import { invalidateListCache } from 'core/utils/list-with-capabilities';
 import {
   formatStanzas,
   policySnippetArgs,
@@ -27,6 +28,7 @@ import type { HTMLElementEvent } from 'vault/forms';
 import type { PolicyData } from 'core/components/code-generator/policy/builder';
 import type { ValidationMap, Validations } from 'vault/vault/app-types';
 import ApiService from 'vault/services/api';
+import type NamespaceService from 'vault/services/namespace';
 import PolicyForm from 'vault/forms/policy';
 
 /**
@@ -64,6 +66,7 @@ export default class PolicyFormComponent extends Component<Args> {
   @service declare readonly analytics: AnalyticsService;
   @service declare readonly flashMessages: FlashMessageService;
   @service declare readonly api: ApiService;
+  @service declare readonly namespace: NamespaceService;
 
   editTypes = { [EditorTypes.VISUAL]: 'Visual editor', [EditorTypes.CODE]: 'Code editor' } as const;
   validations: Validations = {
@@ -229,6 +232,8 @@ export default class PolicyFormComponent extends Component<Args> {
 
       if (policyType === 'acl') {
         yield this.api.sys.policiesWriteAclPolicy(data.name, { policy: data.policy });
+        // Invalidate the ACL list cache so the next list load reflects the newly created/updated policy.
+        invalidateListCache(this.namespace.relativeNamespace, 'acl', 'sys/policies/acl');
       } else if (policyType === 'egp') {
         yield this.api.sys.systemWritePoliciesEgpName(data.name, {
           policy: data.policy,

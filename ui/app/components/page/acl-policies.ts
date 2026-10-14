@@ -8,6 +8,7 @@ import { action } from '@ember/object';
 import { service } from '@ember/service';
 import { tracked } from '@glimmer/tracking';
 import { WIZARD_ID_MAP } from 'vault/utils/constants/wizard';
+import { invalidateListCache } from 'core/utils/list-with-capabilities';
 
 import type ApiService from 'vault/services/api';
 import type FlashMessageService from 'vault/services/flash-messages';
@@ -111,6 +112,8 @@ export default class PageAclPoliciesComponent extends Component<Args> {
     try {
       await this.api.sys.policiesDeleteAclPolicy(item.name);
       this.flashMessages.success(`Successfully deleted policy: ${item.name}`);
+      // Invalidate the ACL list cache before refreshing so the route re-fetches from Vault.
+      invalidateListCache(this.namespace.relativeNamespace, 'acl', 'sys/policies/acl');
       this.router.refresh('vault.cluster.policies.acl');
     } catch (err) {
       const { message } = await this.api.parseError(err);

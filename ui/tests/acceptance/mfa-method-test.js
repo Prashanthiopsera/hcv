@@ -311,6 +311,164 @@ module('Acceptance | mfa-method', function (hooks) {
       .hasText('10', 'Max validation attempts field is updated');
   });
 
+  // ── WO-008: Secret-redaction acceptance gate ──────────────────────────────
+  //
+  // These tests visit the MFA method detail page after Mirage returns a
+  // read payload that echoes the write-only credential back. They assert:
+  //   1. The fixture secret string is absent from document.body.innerHTML (not
+  //      just hidden with CSS — innerHTML would include hidden text).
+  //   2. data-test-mfa-write-only-state shows the correct enrollment state.
+  //
+  // Fixture strings use a TEST_ONLY_ prefix to make their non-production
+  // nature explicit. Never commit real vendor keys.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  test('Duo method detail: secret_key and integration_key are absent from innerHTML, indicators show Configured', async function (assert) {
+    const duoMethod = this.getMethods().find((m) => m.type === 'duo');
+
+    // Override the per-id endpoint to echo write-only secrets in the response
+    this.server.get('/identity/mfa/method/:id', () => ({
+      data: {
+        ...duoMethod,
+        secret_key: 'TEST_ONLY_DUO_SECRET_KEY',
+        integration_key: 'TEST_ONLY_DUO_INTEGRATION_KEY',
+      },
+    }));
+
+    await visit(`/vault/access/mfa/methods/${duoMethod.id}`);
+
+    // The secret strings must not appear anywhere in the document — including
+    // inside CSS-hidden nodes (innerHTML captures all serialized DOM text).
+    assert.false(
+      document.body.innerHTML.includes('TEST_ONLY_DUO_SECRET_KEY'),
+      'secret_key is absent from document innerHTML'
+    );
+    assert.false(
+      document.body.innerHTML.includes('TEST_ONLY_DUO_INTEGRATION_KEY'),
+      'integration_key is absent from document innerHTML'
+    );
+    // textContent check catches secrets that could bypass innerHTML (e.g. in shadow DOM)
+    assert.false(
+      document.body.textContent.includes('TEST_ONLY_DUO_SECRET_KEY'),
+      'secret_key is absent from textContent'
+    );
+
+    // Both write-only indicator rows must render the enrollment state
+    const indicators = document.querySelectorAll('[data-test-mfa-write-only-state]');
+    assert.true(indicators.length > 0, 'write-only indicator rows are rendered');
+    const indicatorTexts = Array.from(indicators).map((el) => el.textContent.trim());
+    assert.true(
+      indicatorTexts.some((t) => t === 'Configured'),
+      'at least one indicator shows Configured for the echoed Duo secret'
+    );
+  });
+
+  test('Okta method detail: api_token is absent from innerHTML, indicator shows Configured', async function (assert) {
+    const oktaMethod = this.getMethods().find((m) => m.type === 'okta');
+
+    this.server.get('/identity/mfa/method/:id', () => ({
+      data: {
+        ...oktaMethod,
+        api_token: 'TEST_ONLY_OKTA_API_TOKEN',
+      },
+    }));
+
+    await visit(`/vault/access/mfa/methods/${oktaMethod.id}`);
+
+    assert.false(
+      document.body.innerHTML.includes('TEST_ONLY_OKTA_API_TOKEN'),
+      'api_token is absent from document innerHTML'
+    );
+    assert.false(
+      document.body.textContent.includes('TEST_ONLY_OKTA_API_TOKEN'),
+      'api_token is absent from textContent'
+    );
+
+    const indicators = document.querySelectorAll('[data-test-mfa-write-only-state]');
+    assert.true(indicators.length > 0, 'write-only indicator is rendered for Okta');
+    assert.strictEqual(
+      indicators[0].textContent.trim(),
+      'Configured',
+      'Okta api_token indicator shows Configured'
+    );
+  });
+
+  test('PingID method detail: settings_file_base64 is absent from innerHTML, indicator shows Configured', async function (assert) {
+    const pingIdMethod = this.getMethods().find((m) => m.type === 'pingid');
+
+    this.server.get('/identity/mfa/method/:id', () => ({
+      data: {
+        ...pingIdMethod,
+        settings_file_base64: 'TEST_ONLY_PINGID_SETTINGS',
+      },
+    }));
+
+    await visit(`/vault/access/mfa/methods/${pingIdMethod.id}`);
+
+    assert.false(
+      document.body.innerHTML.includes('TEST_ONLY_PINGID_SETTINGS'),
+      'settings_file_base64 is absent from document innerHTML'
+    );
+    assert.false(
+      document.body.textContent.includes('TEST_ONLY_PINGID_SETTINGS'),
+      'settings_file_base64 is absent from textContent'
+    );
+
+    const indicators = document.querySelectorAll('[data-test-mfa-write-only-state]');
+    assert.true(indicators.length > 0, 'write-only indicator is rendered for PingID');
+    assert.strictEqual(
+      indicators[0].textContent.trim(),
+      'Configured',
+      'PingID settings_file_base64 indicator shows Configured'
+    );
+  });
+
+  test('Not configured: empty secret_key causes indicator to show Not configured', async function (assert) {
+    const duoMethod = this.getMethods().find((m) => m.type === 'duo');
+
+    this.server.get('/identity/mfa/method/:id', () => ({
+      data: {
+        ...duoMethod,
+        // secret_key intentionally absent (empty / not echoed)
+        secret_key: '',
+        integration_key: 'TEST_ONLY_DUO_INTEGRATION_KEY',
+      },
+    }));
+
+    await visit(`/vault/access/mfa/methods/${duoMethod.id}`);
+
+    // No secret string should appear
+    assert.false(
+      document.body.innerHTML.includes('TEST_ONLY_DUO_INTEGRATION_KEY'),
+      'integration_key is absent from innerHTML'
+    );
+
+    const indicators = document.querySelectorAll('[data-test-mfa-write-only-state]');
+    const indicatorTexts = Array.from(indicators).map((el) => el.textContent.trim());
+    assert.true(
+      indicatorTexts.some((t) => t === 'Not configured'),
+      'indicator for empty secret_key shows Not configured'
+    );
+    assert.true(
+      indicatorTexts.some((t) => t === 'Configured'),
+      'indicator for present integration_key shows Configured'
+    );
+  });
+
+  test('TOTP method detail: issuer is rendered and no write-only indicators appear', async function (assert) {
+    const totpMethod = this.getMethods().find((m) => m.type === 'totp');
+
+    this.server.get('/identity/mfa/method/:id', () => ({
+      data: { ...totpMethod, issuer: 'Vault-Test-Issuer' },
+    }));
+
+    await visit(`/vault/access/mfa/methods/${totpMethod.id}`);
+
+    assert.dom('[data-test-row-label="Issuer"]').exists('Issuer field label renders');
+    assert.dom('[data-test-row-value="Issuer"]').hasText('Vault-Test-Issuer', 'Issuer value renders');
+    assert.dom('[data-test-mfa-write-only-state]').doesNotExist('no write-only indicator rows for TOTP');
+  });
+
   test('it should navigate to enforcements create route from method enforcement tab', async function (assert) {
     await visit('/vault/access/mfa/methods');
     await click('[data-test-mfa-method-list-item]');

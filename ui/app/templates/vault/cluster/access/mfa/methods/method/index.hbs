@@ -69,11 +69,22 @@
     {{/if}}
     {{#each this.displayFields as |field|}}
       <InfoTableRow
-        @alwaysRender={{not (is-empty-value (get this.model.method field))}}
+        @alwaysRender={{not (is-empty-value (get this.sanitizedModel field))}}
         @label={{this.label field}}
-        @value={{get this.model.method field}}
+        @value={{get this.sanitizedModel field}}
         @formatTtl={{eq field "period"}}
       />
+    {{/each}}
+    {{! Write-only credential rows: show "Configured" / "Not configured" without echoing the secret string }}
+    {{#each this.writeOnlyIndicators as |indicator|}}
+      <InfoTableRow @alwaysRender={{true}} @label={{indicator.label}}>
+        <span
+          data-test-mfa-write-only-state
+          aria-label="{{indicator.label}} {{if indicator.configured 'Configured' 'Not configured'}}"
+        >
+          {{if indicator.configured "Configured" "Not configured"}}
+        </span>
+      </InfoTableRow>
     {{/each}}
   </div>
 {{else if (eq this.tab "enforcements")}}

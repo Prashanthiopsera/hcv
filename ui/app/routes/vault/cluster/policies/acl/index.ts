@@ -7,10 +7,12 @@ import Route from '@ember/routing/route';
 import { service } from '@ember/service';
 import { policiesAclListViewConfig } from 'vault/utils/constants/list-view-config/policies-acl';
 import { SystemApiPoliciesListAclPoliciesListEnum } from '@hashicorp/vault-client-typescript';
+import { invalidateListCache } from 'core/utils/list-with-capabilities';
 
 import type ApiService from 'vault/services/api';
 import type CapabilitiesService from 'vault/services/capabilities';
 import type Controller from '@ember/controller';
+import type NamespaceService from 'vault/services/namespace';
 import type { Capabilities } from 'vault/app-types';
 
 // RouteParams must extend Record<string, unknown> for the Ember Route base type
@@ -34,6 +36,10 @@ export interface PoliciesAclIndexModel {
 export default class PoliciesAclIndexRoute extends Route {
   @service declare readonly api: ApiService;
   @service declare readonly capabilities: CapabilitiesService;
+  @service declare readonly namespace: NamespaceService;
+
+  /** Track the last seen namespace to detect changes between model() invocations. */
+  _prevNamespace: string | undefined = undefined;
 
   queryParams = {
     page: { refreshModel: true },
@@ -43,6 +49,15 @@ export default class PoliciesAclIndexRoute extends Route {
 
   async model(params: RouteParams): Promise<PoliciesAclIndexModel> {
     const { page, pageSize } = params;
+    const ns = this.namespace.relativeNamespace;
+    const mount = 'sys/policies/acl';
+
+    // If the namespace changed since the last model load, evict the stale cache entry
+    // so the next loadListPage (or list call) fetches fresh data from Vault.
+    if (this._prevNamespace !== undefined && this._prevNamespace !== ns) {
+      invalidateListCache(this._prevNamespace, 'acl', mount);
+    }
+    this._prevNamespace = ns;
 
     const { keys } = await this.api.sys.policiesListAclPolicies(
       SystemApiPoliciesListAclPoliciesListEnum.TRUE

@@ -11,10 +11,12 @@ import { waitFor } from '@ember/test-waiters';
 import { service } from '@ember/service';
 import trimRight from 'vault/utils/trim-right';
 import FormField from 'vault/utils/forms/field';
+import { invalidateListCache } from 'core/utils/list-with-capabilities';
 
 import type FlashMessageService from 'vault/services/flash-messages';
 import type ApiService from 'vault/services/api';
 import type SecretMountPath from 'vault/services/secret-mount-path';
+import type NamespaceService from 'vault/services/namespace';
 
 /**
  * @module PkiKeyImport
@@ -33,6 +35,7 @@ export default class PkiKeyImport extends Component<Args> {
   @service declare readonly flashMessages: FlashMessageService;
   @service declare readonly api: ApiService;
   @service declare readonly secretMountPath: SecretMountPath;
+  @service declare readonly namespace: NamespaceService;
 
   @tracked errorBanner = '';
   @tracked invalidFormAlert = '';
@@ -53,6 +56,9 @@ export default class PkiKeyImport extends Component<Args> {
         pem_bundle: this.pemBundle,
       });
       this.flashMessages.success(`Successfully imported key${this.keyName ? ` ${this.keyName}.` : '.'}`);
+      // Invalidate the PKI key list cache — only on success. pem_bundle is never
+      // written to the cache; the next pkiListKeys will fetch key_id/key_name only.
+      invalidateListCache(this.namespace.relativeNamespace, 'pki-keys', this.secretMountPath.currentPath);
       this.args.onSave();
     } catch (error) {
       const { message } = yield this.api.parseError(error);

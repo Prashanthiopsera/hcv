@@ -8,7 +8,7 @@ import { service } from '@ember/service';
 import { withConfig } from 'pki/decorators/check-issuers';
 import { PKI_DEFAULT_EMPTY_STATE_MSG } from 'pki/routes/overview';
 import { SecretsApiPkiListKeysListEnum } from '@hashicorp/vault-client-typescript';
-import { loadListPage } from 'core/utils/list-with-capabilities';
+import { loadListPage, invalidateListCache } from 'core/utils/list-with-capabilities';
 
 /**
  * PkiKeysIndexRoute — WO-011 rewire to loadListPage.
@@ -29,6 +29,14 @@ export default class PkiKeysIndexRoute extends Route {
   @service capabilities;
   @service namespace;
 
+  /**
+   * Track the last seen mount path and namespace so that when either changes
+   * the stale cache entry is evicted before the next model load.
+   * This prevents the previous mount's key names from appearing in the new mount's list.
+   */
+  _prevMount = undefined;
+  _prevNamespace = undefined;
+
   queryParams = {
     page: {
       refreshModel: true,
@@ -43,6 +51,15 @@ export default class PkiKeysIndexRoute extends Route {
 
     const backend = this.secretMountPath.currentPath;
     const ns = this.namespace.relativeNamespace ?? '';
+
+    // Evict stale cache entries when the operator switches mount or namespace.
+    // A mount change means the previous mount's keys could be served from cache
+    // for the new mount — we must drop the old entry before loadListPage runs.
+    if (this._prevMount !== undefined && (this._prevMount !== backend || this._prevNamespace !== ns)) {
+      invalidateListCache(this._prevNamespace ?? '', 'pki-keys', this._prevMount);
+    }
+    this._prevMount = backend;
+    this._prevNamespace = ns;
     const importPath = this.capabilities.pathFor('pkiKeysImport', { backend });
     const generatePath = this.capabilities.pathFor('pkiKeysGenerate', { backend });
 

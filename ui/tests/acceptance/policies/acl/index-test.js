@@ -378,6 +378,50 @@ module('Acceptance | ACL policies list view', function (hooks) {
       .hasText('policy-beta', 'edit page shows policy-beta, not the stale policy-alpha');
   });
 
+  // ── WO-018: page-only capabilities and LIST-call count ──────────────────
+  //
+  // These assertions lock the behaviour introduced by WO-010 (loadListPage):
+  //   - capabilities-self receives only the current page's rows plus one create path
+  //   - the session cache prevents a second LIST call when navigating to page 2
+
+  test('capabilities-self receives at most 11 paths for a 15-name list at page size 10', async function (assert) {
+    // pageSize defaults to 10, so with 15 names on page 1 the route should send
+    // at most 10 row paths + 1 create path = 11 paths to capabilities-self.
+    let capturedPaths = [];
+    const fifteenPolicies = Array.from({ length: 15 }, (_, i) => `wired-policy-${i}`);
+    this.server.get('sys/policies/acl/', () => ({
+      data: { keys: fifteenPolicies },
+      request_id: 'test',
+    }));
+    this.server.post('sys/capabilities-self', (schema, request) => {
+      const body = JSON.parse(request.requestBody);
+      // Accumulate paths across all capabilities-self calls in this test.
+      capturedPaths = capturedPaths.concat(body.paths ?? []);
+      return { data: {}, request_id: 'test' };
+    });
+    await visit('/vault/policies/acl');
+    assert.true(
+      capturedPaths.length <= 11,
+      `capabilities-self received ${capturedPaths.length} paths — expected ≤ 11 (pageSize=10 + 1 create path)`
+    );
+  });
+
+  test('visiting page 2 does not increment the LIST call count (session cache hit)', async function (assert) {
+    // After page 1 populates the session cache, navigating to page 2 must not
+    // trigger a second GET /sys/policies/acl call.  If the count is > 1 the
+    // route is bypassing the cache and re-fetching the full directory.
+    let listCallCount = 0;
+    const twentyPolicies = Array.from({ length: 20 }, (_, i) => `cached-policy-${i}`);
+    this.server.get('sys/policies/acl/', () => {
+      listCallCount += 1;
+      return { data: { keys: twentyPolicies }, request_id: 'test' };
+    });
+    await visit('/vault/policies/acl');
+    assert.strictEqual(listCallCount, 1, 'LIST called exactly once on page 1');
+    await click(GENERAL.nextPage);
+    assert.strictEqual(listCallCount, 1, 'LIST not called again on page 2 — session cache served the names');
+  });
+
   // ── HTTP status contract (WO-013) ────────────────────────────────────────
   //
   // Only HTTP 404 from GET /sys/policies/acl means "no policies exist yet" and

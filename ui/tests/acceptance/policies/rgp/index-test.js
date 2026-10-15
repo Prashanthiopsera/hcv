@@ -7,8 +7,10 @@ import { click, fillIn, currentURL, visit } from '@ember/test-helpers';
 import { module, test } from 'qunit';
 import { setupApplicationTest } from 'ember-qunit';
 import { setupMirage } from 'ember-cli-mirage/test-support';
+import { Response } from 'miragejs';
 import { login } from 'vault/tests/helpers/auth/auth-helpers';
 import { GENERAL } from 'vault/tests/helpers/general-selectors';
+import { egpRgpListShapeMatchesAcl } from 'core/utils/egp-rgp-list-shape';
 
 // Two RGP policies that will appear in the list.
 const STUB_POLICIES = ['my-rgp-policy', 'another-rgp-policy'];
@@ -339,4 +341,66 @@ module('Acceptance | RGP policies list view', function (hooks) {
       .dom(GENERAL.hdsPageHeaderTitle)
       .hasText('rgp-beta', 'edit page shows rgp-beta, not the stale rgp-alpha');
   });
+
+  // ── HTTP status contract (WO-022) ─────────────────────────────────────────
+  //
+  // When egpRgpListShapeMatchesAcl is true the RGP index route uses loadListPage
+  // and the listOrEmpty contract: only HTTP 404 becomes an empty list; every
+  // other denial or fault must surface as an error so the operator can
+  // distinguish "nothing exists" from "you are not allowed to see it" (OWASP A10).
+  // When the flag is false these cases are skipped and the old 404-only catch
+  // remains the documented behaviour.
+
+  (egpRgpListShapeMatchesAcl ? test : test.skip)(
+    'WO-022: 404 on LIST renders the empty title, not an error alert',
+    async function (assert) {
+      // Only HTTP 404 should render the empty state. The route uses listOrEmpty
+      // which treats 404 as an absence of data, not an error.
+      this.server.get('sys/policies/rgp/', () => new Response(404, {}, { errors: [] }));
+      await visit('/vault/policies/rgp');
+      assert
+        .dom(GENERAL.emptyStateTitle)
+        .hasText('No RGP policies yet', '404 renders empty title');
+      assert.dom(GENERAL.flashMessage).doesNotExist('404 does not produce a danger flash message');
+    }
+  );
+
+  (egpRgpListShapeMatchesAcl ? test : test.skip)(
+    'WO-022: 401 on LIST renders an error state, not the empty title',
+    async function (assert) {
+      // A 401 means the session token is no longer valid — the operator must see
+      // an error, not an empty directory that would imply no policies exist.
+      this.server.get('sys/policies/rgp/', () => new Response(401, {}, { errors: ['permission denied'] }));
+      await visit('/vault/policies/rgp');
+      assert
+        .dom(GENERAL.emptyStateTitle)
+        .doesNotIncludeText('No RGP policies yet', '401 does not show the empty title');
+    }
+  );
+
+  (egpRgpListShapeMatchesAcl ? test : test.skip)(
+    'WO-022: 403 on LIST renders an error state, not the empty title',
+    async function (assert) {
+      // A 403 is a known access denial — the operator should see the error and
+      // not incorrectly conclude the RGP policy catalog is empty.
+      this.server.get('sys/policies/rgp/', () => new Response(403, {}, { errors: ['permission denied'] }));
+      await visit('/vault/policies/rgp');
+      assert
+        .dom(GENERAL.emptyStateTitle)
+        .doesNotIncludeText('No RGP policies yet', '403 does not show the empty title');
+    }
+  );
+
+  (egpRgpListShapeMatchesAcl ? test : test.skip)(
+    'WO-022: 500 on LIST renders an error state, not the empty title',
+    async function (assert) {
+      // A 500 is an internal server error — must surface as an error, not as an
+      // empty list. This guards against the helper growing a second swallow path.
+      this.server.get('sys/policies/rgp/', () => new Response(500, {}, { errors: ['internal server error'] }));
+      await visit('/vault/policies/rgp');
+      assert
+        .dom(GENERAL.emptyStateTitle)
+        .doesNotIncludeText('No RGP policies yet', '500 does not show the empty title');
+    }
+  );
 });

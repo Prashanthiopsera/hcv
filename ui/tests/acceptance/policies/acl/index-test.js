@@ -377,4 +377,60 @@ module('Acceptance | ACL policies list view', function (hooks) {
       .dom(GENERAL.hdsPageHeaderTitle)
       .hasText('policy-beta', 'edit page shows policy-beta, not the stale policy-alpha');
   });
+
+  // ── HTTP status contract (WO-013) ────────────────────────────────────────
+  //
+  // Only HTTP 404 from GET /sys/policies/acl means "no policies exist yet" and
+  // must render the empty-collection title. Every other status (401, 403, 500,
+  // and transport failure) must surface as a visible error so the operator
+  // can distinguish an empty directory from a permission denial.
+
+  test('404 on LIST renders the empty title No ACL policies yet', async function (assert) {
+    // A 404 means the ACL policy collection has not been created yet, not that
+    // access was denied. The template must show the empty-state title and must
+    // not render a failure alert.
+    this.server.get('sys/policies/acl/', () => new Response(404, {}, { errors: [] }));
+    await visit('/vault/policies/acl');
+    assert.dom(GENERAL.emptyStateTitle).hasText('No ACL policies yet', '404 renders empty title');
+    assert.dom(GENERAL.flashMessage).doesNotExist('404 does not produce a danger flash message');
+  });
+
+  test('401 on LIST renders an error state, not the empty title', async function (assert) {
+    // A 401 means the session token is no longer valid — the operator must see
+    // an error, not an empty directory that would imply no policies exist.
+    this.server.get('sys/policies/acl/', () => new Response(401, {}, { errors: ['permission denied'] }));
+    await visit('/vault/policies/acl');
+    assert
+      .dom(GENERAL.emptyStateTitle)
+      .doesNotIncludeText('No ACL policies yet', '401 does not show the empty title');
+  });
+
+  test('403 on LIST renders an error state, not the empty title', async function (assert) {
+    // A 403 is a known-access-denied — the operator should see the error message
+    // "permission denied" and not incorrectly conclude the directory is empty.
+    this.server.get('sys/policies/acl/', () => new Response(403, {}, { errors: ['permission denied'] }));
+    await visit('/vault/policies/acl');
+    assert
+      .dom(GENERAL.emptyStateTitle)
+      .doesNotIncludeText('No ACL policies yet', '403 does not show the empty title');
+  });
+
+  test('500 on LIST renders an error state, not the empty title', async function (assert) {
+    // A 500 is an internal server error — must surface as an error, not an empty list.
+    this.server.get('sys/policies/acl/', () => new Response(500, {}, { errors: ['internal server error'] }));
+    await visit('/vault/policies/acl');
+    assert
+      .dom(GENERAL.emptyStateTitle)
+      .doesNotIncludeText('No ACL policies yet', '500 does not show the empty title');
+  });
+
+  test('500 on capabilities-self after 200 LIST does not replace rows with the empty title', async function (assert) {
+    // A capabilities POST failure must remain fail-open (row hints hidden) — it
+    // must NOT turn a successful 200 LIST into a "No ACL policies yet" render.
+    // Override the global capabilities stub for this test only.
+    this.server.post('sys/capabilities-self', () => new Response(500, {}, { errors: ['server error'] }));
+    await visit('/vault/policies/acl');
+    // The list still rendered (names from the default STUB_POLICIES are visible).
+    assert.dom(GENERAL.emptyStateTitle).doesNotExist('capabilities 500 does not show the empty state');
+  });
 });

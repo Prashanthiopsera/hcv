@@ -59,11 +59,25 @@ export default class PoliciesAclIndexRoute extends Route {
     }
     this._prevNamespace = ns;
 
-    const { keys } = await this.api.sys.policiesListAclPolicies(
-      SystemApiPoliciesListAclPoliciesListEnum.TRUE
-    );
-
-    const names = keys ?? [];
+    // Mirror the EGP/RGP 404-only catch: an HTTP 404 means no ACL policies exist yet
+    // and must render the empty title, not a failure alert. All other statuses
+    // (401, 403, 500, transport failure) propagate as real errors so the operator
+    // can distinguish "no policies" from "access denied".
+    let names: string[] = [];
+    try {
+      const { keys } = await this.api.sys.policiesListAclPolicies(
+        SystemApiPoliciesListAclPoliciesListEnum.TRUE
+      );
+      names = keys ?? [];
+    } catch (err) {
+      const { status } = await this.api.parseError(err);
+      // Only 404 is treated as an empty collection — permission denials and server
+      // errors must surface so the operator requests access instead of concluding
+      // the directory is empty.
+      if (status !== 404) {
+        throw err;
+      }
+    }
 
     // Fetch per-row capabilities for read, update, and delete on each policy path.
     const paths = names.map((name) => this.capabilities.pathFor('policy', { policyType: 'acl', id: name }));

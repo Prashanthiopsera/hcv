@@ -1,0 +1,3 @@
+```release-note:improvement
+ui: bounded PKI key list loading — capabilities-self now receives only the current page (pageSize=15) of key paths plus the import and generate paths, instead of the full directory on every page turn; HTTP 404 resolves to an empty state and HTTP 401/403 surface as errors rather than an empty catalog
+```

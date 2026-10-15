@@ -7,9 +7,12 @@ import Route from '@ember/routing/route';
 import { service } from '@ember/service';
 import { policiesRgpListViewConfig } from 'vault/utils/constants/list-view-config/policies-rgp';
 import { SystemApiSystemListPoliciesRgpListEnum } from '@hashicorp/vault-client-typescript';
+import { loadListPage, _getCache, invalidateListCache } from 'core/utils/list-with-capabilities';
+import { egpRgpListShapeMatchesAcl } from 'core/utils/egp-rgp-list-shape';
 
 import type ApiService from 'vault/services/api';
 import type CapabilitiesService from 'vault/services/capabilities';
+import type NamespaceService from 'vault/services/namespace';
 import type Controller from '@ember/controller';
 import type { Capabilities } from 'vault/app-types';
 
@@ -18,6 +21,8 @@ import type { Capabilities } from 'vault/app-types';
 interface RouteParams extends Record<string, unknown> {
   page?: string;
   pageSize?: string;
+  sortBy?: string;
+  sortOrder?: string;
 }
 
 export interface PoliciesRgpIndexModel {
@@ -31,9 +36,23 @@ export interface PoliciesRgpIndexModel {
   pageSize: number;
 }
 
+/**
+ * PoliciesRgpIndexRoute — WO-020 conditional adoption of loadListPage.
+ *
+ * Migrated because egpRgpListShapeMatchesAcl is true (see WO-015 decision record).
+ * The Sentinel has-feature gate lives in rgp/create.js, NOT here — this migration
+ * cannot accidentally remove it.
+ *
+ * Cache key: "<relativeNamespace>::rgp::sys/policies/rgp"
+ * Capabilities: only current-page slice plus one create path (≤ pageSize + 1).
+ */
 export default class PoliciesRgpIndexRoute extends Route {
   @service declare readonly api: ApiService;
   @service declare readonly capabilities: CapabilitiesService;
+  @service declare readonly namespace: NamespaceService;
+
+  /** Track the last seen namespace to detect changes between model() invocations. */
+  _prevNamespace: string | undefined = undefined;
 
   queryParams = {
     page: { refreshModel: true },
@@ -44,31 +63,117 @@ export default class PoliciesRgpIndexRoute extends Route {
   async model(params: RouteParams): Promise<PoliciesRgpIndexModel> {
     const { page, pageSize } = params;
 
-    let keys: string[] = [];
-    try {
-      const result = await this.api.sys.systemListPoliciesRgp(SystemApiSystemListPoliciesRgpListEnum.TRUE);
-      keys = result.keys ?? [];
-    } catch (err) {
-      const { status } = await this.api.parseError(err);
-      // Sentinel policies can be 404 when none exist yet
-      if (status !== 404) {
-        throw err;
+    // If the shape flag is false, fall back to the original direct-call approach.
+    if (!egpRgpListShapeMatchesAcl) {
+      let keys: string[] = [];
+      try {
+        const result = await this.api.sys.systemListPoliciesRgp(SystemApiSystemListPoliciesRgpListEnum.TRUE);
+        keys = result.keys ?? [];
+      } catch (err) {
+        const { status } = await this.api.parseError(err);
+        if (status !== 404) {
+          throw err;
+        }
       }
+
+      const paths = keys.map((name) => this.capabilities.pathFor('policy', { policyType: 'rgp', id: name }));
+      const capabilitiesMap = paths.length ? await this.capabilities.fetch(paths) : {};
+      const policies = keys.map((name, i) => ({
+        name,
+        capabilities: (paths[i] ? capabilitiesMap[paths[i]] : null) ?? null,
+      }));
+      const { canCreate } = await this.capabilities.for('policiesRgp');
+      const listViewConfig = { ...policiesRgpListViewConfig };
+      listViewConfig.breadcrumbs = [
+        { label: 'Vault', route: 'vault.cluster.dashboard', icon: 'vault' },
+        { label: 'RGP policies' },
+      ];
+      return { policies, listViewConfig, canCreate, page: Number(page) || 1, pageSize: Number(pageSize) || 10 };
     }
 
-    // Fetch per-row capabilities for read, update, and delete on each policy path.
-    const paths = keys.map((name) => this.capabilities.pathFor('policy', { policyType: 'rgp', id: name }));
-    const capabilitiesMap = paths.length ? await this.capabilities.fetch(paths) : {};
+    // ── loadListPage path (egpRgpListShapeMatchesAcl === true) ──────────────
+    const pSize = Number(pageSize) || 10;
+    const pNum = Number(page) || 1;
+    const sortOrder: 'asc' | 'desc' = params.sortOrder === 'desc' ? 'desc' : 'asc';
 
-    const policies = keys.map((name, i) => {
-      const path = paths[i];
-      return {
-        name,
-        capabilities: (path ? capabilitiesMap[path] : null) ?? null,
-      };
-    });
+    const ns = this.namespace.relativeNamespace ?? '';
+    const mount = 'sys/policies/rgp';
+    const createPath = this.capabilities.pathFor('policiesRgp');
 
-    const { canCreate } = await this.capabilities.for('policiesRgp');
+    // Evict the stale namespace cache entry on namespace switch.
+    if (this._prevNamespace !== undefined && this._prevNamespace !== ns) {
+      invalidateListCache(this._prevNamespace, 'rgp', mount);
+    }
+    this._prevNamespace = ns;
+
+    // Sync parseError adapter — reads HTTP status without awaiting response body.
+    const parseError = (error: unknown): { status?: number } | null | undefined => {
+      if (!error || typeof error !== 'object') return null;
+      const e = error as Record<string, unknown>;
+      const resp = e['response'] as Record<string, unknown> | undefined;
+      const status =
+        typeof resp?.['status'] === 'number'
+          ? resp['status']
+          : typeof e['status'] === 'number'
+          ? (e['status'] as number)
+          : undefined;
+      return { status };
+    };
+
+    const result = await loadListPage<string>(
+      {
+        namespace: ns,
+        listType: 'rgp',
+        mount,
+        page: pNum,
+        pageSize: pSize,
+        sortOrder,
+        pathForCreate: createPath,
+        pathForRow: (row) => this.capabilities.pathFor('policy', { policyType: 'rgp', id: row as string }),
+      },
+      {
+        listFn: async () => {
+          const { keys } = await this.api.sys.systemListPoliciesRgp(
+            SystemApiSystemListPoliciesRgpListEnum.TRUE
+          );
+          return (keys ?? []) as string[];
+        },
+        capabilitiesFetch: (paths) =>
+          this.capabilities.fetch(paths) as unknown as Promise<Record<string, Record<string, boolean>>>,
+        parseError,
+      }
+    );
+
+    let policies: Array<{ name: string; capabilities: Capabilities | null }>;
+    let canCreate = false;
+
+    if (result.kind === 'empty') {
+      policies = [];
+      const createCaps = await this.capabilities.for('policiesRgp');
+      canCreate = createCaps?.canCreate ?? false;
+    } else if (result.kind === 'error') {
+      // 401, 403, 500 or network failure — surface as an error (OWASP A10 fail-closed).
+      const err = Object.assign(new Error(`List RGP policies failed: HTTP ${result.status}`), {
+        status: result.status,
+      });
+      throw err;
+    } else {
+      // kind: 'page' — retrieve all cached names so Page::ListView can paginate globally.
+      const cacheKey = `${ns}::rgp::${mount}`;
+      const allNames = (_getCache().get(cacheKey) as string[] | undefined) ?? [];
+      const capsByPath = result.capabilities;
+      const pageItemSet = new Set(result.items);
+
+      policies = allNames.map((name) => {
+        if (pageItemSet.has(name)) {
+          const path = this.capabilities.pathFor('policy', { policyType: 'rgp', id: name });
+          return { name, capabilities: (capsByPath[path] ?? null) as Capabilities | null };
+        }
+        return { name, capabilities: null };
+      });
+
+      canCreate = (capsByPath[createPath]?.['canCreate'] ?? false) as boolean;
+    }
 
     const listViewConfig = { ...policiesRgpListViewConfig };
     listViewConfig.breadcrumbs = [
@@ -76,7 +181,7 @@ export default class PoliciesRgpIndexRoute extends Route {
       { label: 'RGP policies' },
     ];
 
-    return { policies, listViewConfig, canCreate, page: Number(page) || 1, pageSize: Number(pageSize) || 10 };
+    return { policies, listViewConfig, canCreate, page: pNum, pageSize: pSize };
   }
 
   resetController(

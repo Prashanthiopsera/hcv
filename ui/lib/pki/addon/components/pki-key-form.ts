@@ -9,6 +9,7 @@ import { task } from 'ember-concurrency';
 import { tracked } from '@glimmer/tracking';
 import { waitFor } from '@ember/test-waiters';
 import { action } from '@ember/object';
+import { invalidateListCache } from 'core/utils/list-with-capabilities';
 
 import type FlashMessageService from 'vault/services/flash-messages';
 import type PkiKeyForm from 'vault/forms/secrets/pki/key';
@@ -17,6 +18,7 @@ import type ApiService from 'vault/services/api';
 import type SecretMountPathService from 'vault/services/secret-mount-path';
 import type RouterService from '@ember/routing/router-service';
 import type CapabilitiesService from 'vault/services/capabilities';
+import type NamespaceService from 'vault/services/namespace';
 import type {
   PkiGenerateInternalKeyRequest,
   PkiGenerateExportedKeyRequest,
@@ -46,6 +48,7 @@ export default class PkiKeyFormComponent extends Component<Args> {
   @service declare readonly secretMountPath: SecretMountPathService;
   @service('app-router') declare readonly router: RouterService;
   @service declare readonly capabilities: CapabilitiesService;
+  @service declare readonly namespace: NamespaceService;
 
   @tracked errorBanner = '';
   @tracked invalidFormAlert = '';
@@ -89,6 +92,13 @@ export default class PkiKeyFormComponent extends Component<Args> {
               data.key_name ? ` ${data.key_name}.` : '.'
             }`
           );
+
+          // Invalidate the PKI key list cache so the next keys.index visit reflects
+          // the newly generated key. Only called on success — a rejected generate
+          // must leave the cache intact so the operator still sees the last valid list.
+          if (form.isNew) {
+            invalidateListCache(this.namespace.relativeNamespace, 'pki-keys', currentPath);
+          }
 
           const { private_key, key_id: keyId } = this.generatedKey;
           // only transition to details if there is no private_key data to display

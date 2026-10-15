@@ -91,3 +91,74 @@ lazyCaches = new Map({
   ...
 })
 ```
+
+## List-with-capabilities request path
+
+This section is a read-only evidence map of the list-plus-capabilities pattern adopted
+by the ACL policy and PKI key list routes. No Go files, the generated client, or any
+`http.Handler` code is modified by this documentation — the described path is already
+shipped.
+
+### Route → server call chain
+
+| Layer | Symbol | Notes |
+|---|---|---|
+| Ember addon helper | `loadListPage` in `ui/lib/core/addon/utils/list-with-capabilities.ts` | Session-caches the full key array; slices to `pageSize` rows before fetching capabilities |
+| ACL route | `PoliciesAclIndexRoute` (`ui/app/routes/vault/cluster/policies/acl/index.ts`) | Calls `loadListPage` with `pageSize=10` and `listType='acl'` |
+| PKI keys route | `PkiKeysIndexRoute` (`ui/lib/pki/addon/routes/keys/index.js`) | Calls `loadListPage` with `pageSize=15` and `listType='pki-keys'` |
+| Generated TypeScript client | `policiesListAclPolicies` on `@hashicorp/vault-client-typescript` / `SecretsApiPkiListKeysListEnum` for PKI | Thin wrapper around the HTTP call; no page or limit field |
+| Go API helper | `api/sys_policy.go` `ListPoliciesWithContext` | Sends `GET /v1/sys/policies/acl` with `list=true`; decodes `secret.Data["keys"]` into a `[]string`; **has no page or limit parameter** |
+| HTTP handler | `http/handler.go` | `CustomMaxJSONArrayElementCount` stays **10000**; `http/handler.go`, `api/sys_policy.go`, and `vault/policy_store.go` are **not edited** by this or any WO in the list-with-capabilities feature set |
+| Logical backend | `vault/policy_store.go` `PolicyStore.ListPolicies` | Scans the barrier view with `logical.CollectKeys`; returns every ACL name as a flat slice with no cursor |
+
+### Session cache contract
+
+- **Storage**: in-memory `Map` keyed by `${namespace}::${listType}::${mount}` — never
+  `localStorage`, never serialised to disk.
+- **ACL rows**: name strings only. No policy body, no HCL, no secret material.
+- **PKI rows**: `key_id`, `key_name`, `is_default`. No PEM, no `private_key`.
+- **Page sizes**: `10` for ACL policies, `15` for PKI keys (unless the route already
+  overrides `pageSize`).
+- **Cache eviction**: `invalidateListCache(namespace, listType, mount)` is called after
+  create, delete, or namespace change. The module-level Map is accessible via `_getCache()`
+  in tests only.
+
+### Capabilities fetch contract
+
+- **One POST to `/sys/capabilities-self`** per page navigation, covering the visible page
+  rows plus one create path (`pathFor('policiesAcl')` or `pathFor('policy', {policyType, id})`).
+- **PKI adds two extra paths**: `pathFor('pkiKeysImport')` and `pathFor('pkiKeysGenerate')`.
+- Capabilities for rows outside the current page are **never requested**; the prior full-scan
+  pattern is replaced by this page-bounded fetch.
+- A capabilities POST failure is **fail-open** inside `CapabilitiesService` — the server
+  remains the authority; a missing capabilities response does not prevent the list from
+  rendering, but the server will still deny any unauthorised action.
+
+### HTTP status contract (`listOrEmpty`)
+
+| HTTP status from LIST | Route behaviour |
+|---|---|
+| `200` | Normal; names cached and sliced to page |
+| `404` | Empty list — renders `"No ACL policies yet"` / `"No keys yet"` empty state |
+| `401` | **Re-thrown as error** — never mapped to empty |
+| `403` | **Re-thrown as error** — never mapped to empty |
+| `5xx` / other | **Re-thrown as error** — never mapped to empty |
+
+This is the `listOrEmpty` contract. Only `404` is treated as an absence of data;
+every denial (`401`, `403`) and server fault surfaces as an error so operators can
+distinguish "nothing exists" from "you are not allowed to see it" (OWASP A10).
+
+### EGP and RGP routes
+
+EGP (`PoliciesEgpIndexRoute`) and RGP (`PoliciesRgpIndexRoute`) adopt `loadListPage`
+conditionally when `egpRgpListShapeMatchesAcl = true` (recorded by WO-015). When the
+flag is `false`, both routes keep their existing direct-call approach and are listed here
+as **unchanged routes** — not as failed migrations.
+
+### Out of scope
+
+The following routes do **not** adopt `loadListPage` and are not described here:
+- KV secrets (`ui/lib/kv`)
+- LDAP (`ui/lib/ldap`)
+- KMIP (`ui/lib/kmip`)
+- Identity entity list (`ui/app/routes/vault/cluster/access/identity/entities/index.js`)
